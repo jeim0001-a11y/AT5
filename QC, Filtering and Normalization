@@ -1,3 +1,5 @@
+######EXERCISE 02########
+
 .libPaths(c("/fs04/scratch2/bm26/shared_spatial_scRNAseq_env/spatialR_2026/renv/library/linux-ubuntu-noble/R-4.4/x86_64-pc-linux-gnu", .libPaths()))
 
 #Loading R libraries required
@@ -99,3 +101,339 @@ saveHDF5SummarizedExperiment(sub,
                              chunkdim = NULL, level = NULL, as.sparse = NA,
                              verbose = NA
 )
+
+
+#######EXERCISE 02#######
+
+#Load Packages
+library(SpatialExperiment)
+library(SpotSweeper)
+library(scuttle)
+library(ggplot2)
+library(scater)
+library(ggside)
+library(escheR)
+library(HDF5Array)
+library(ggspavis)
+library(patchwork)
+library(BiocManager)
+
+getwd()
+
+#---Step1: Start by loading the SpatialExperiment object---#
+data_path="/fs04/scratch2/bm26/eeka0003/AT5/Young_0/Exercise 1"
+spe <- loadHDF5SummarizedExperiment(dir=data_path, prefix="01.Day0_Young_")
+
+#---Step2: Calculate QC metrics---#
+is.mito <- rownames(spe)[grepl("^mt-", rownames(spe))]
+spe <- addPerCellQCMetrics(spe, subsets = list(Mito = is.mito))
+head(data.frame(colData(spe)))
+
+#---Step3: Global outlier detection---#
+p1 <- ggcells(spe, aes(x=detected, y=sum)) +
+  geom_point() +
+  geom_density_2d() +
+  scale_x_log10() +
+  scale_y_log10() +
+  geom_xsidehistogram() +
+  geom_ysidehistogram() +
+  geom_vline(xintercept = 300, col="red", lty=2) +
+  geom_hline(yintercept = 400, col="red", lty=2) +
+  labs(y="Number of UMIs", x="Number of detected genes") +
+  ggtitle("Library size vs. detected")
+
+p2 <- ggcells(spe, aes(x=detected, y=subsets_Mito_percent)) +
+  geom_point() +
+  geom_density_2d() +
+  scale_x_log10() +
+  geom_xsidehistogram() +
+  geom_ysidehistogram() +
+  geom_vline(xintercept = 300, col="red", lty=2) +
+  geom_hline(yintercept = 15, col="red", lty=2) +
+  labs(y="% mitochondrial reads", x="Number of detected genes") +
+  ggtitle("Mito proportion vs. genes detected")
+p1 + p2
+
+#Check how many spots would be removed with each of the given thresolds
+spe$qc_lib_size <- spe$sum < 400
+spe$qc_detected <- spe$detected < 300
+spe$qc_mito_prop <- spe$subsets_Mito_percent > 15
+qc <- grep("^qc", names(colData(spe)))
+sapply(colData(spe)[qc], table)
+
+#Visualize spatial pattern of QC metrics based on the Global outliers
+p1 <- ggspavis::plotSpotQC(spe,
+                           plot_type="spot", annotate="qc_lib_size") +
+  ggtitle("Library size (< 400 UMI)")
+p2 <- ggspavis::plotSpotQC(spe,
+                           plot_type="spot", annotate="qc_detected") +
+  ggtitle("Detected genes (< 300 genes)")
+p3 <- ggspavis::plotSpotQC(spe,
+                           plot_type="spot", annotate="qc_mito_prop") +
+  ggtitle("Mito proportion (> 15%)")
+
+gridExtra::grid.arrange(p1, p2, p3, ncol=2)
+
+plotVisium(spe, annotate = "subsets_Mito_percent", zoom = TRUE)
+
+
+#---Step4: Local Outlier Detection---#
+
+spe <- localOutliers(spe,
+                     metric = "sum",
+                     direction = "lower",
+                     log = TRUE
+)
+
+colData(spe)
+head(spe$sum_outliers)
+summary(spe$sum_outliers)
+
+spe <- localOutliers(spe,
+                     metric = "detected",
+                     direction = "lower",
+                     log = TRUE
+)
+
+spe <- localOutliers(spe,
+                     metric = "subsets_Mito_percent",
+                     direction = "higher",
+                     log = FALSE
+)
+
+spe$local_outliers <- as.logical(spe$sum_outliers) |
+  as.logical(spe$detected_outliers) | as.logical(spe$subsets_Mito_percent_outliers)
+
+table(spe$local_outliers)
+
+ggspavis::plotSpotQC(spe,
+                     plot_type="spot", annotate="local_outliers") +
+  ggtitle("All local outliers")
+
+
+plotQCmetrics(spe,
+              metric = "subsets_Mito_percent", outliers = "subsets_Mito_percent_outliers",
+              point_size = 0.4,
+              stroke = 0.75
+) +
+  ggtitle("Local outliers for %mt")
+
+p1 <- plotQCmetrics(spe,
+                    metric = "sum_log", outliers = "sum_outliers", point_size = 0.4,
+                    stroke = 0.75
+) +
+  ggtitle("Local outliers for number of UMIs")
+p2 <- plotQCmetrics(spe,
+                    metric = "detected_log", outliers = "detected_outliers", point_size = 0.4,
+                    stroke = 0.75
+) +
+  ggtitle("Local outliers for number of UMIs")
+
+gridExtra::grid.arrange(p1, p2, ncol=2)
+
+#Visualize the z-scores from the local outlier detection test
+#The global filtering based on the qc_mito_prop
+print(table(data.frame(colData(spe))$qc_mito_prop))
+p <- ggspavis::plotSpotQC(spe, plot_type = "violin", x_metric = "subsets_Mito_percent_z", annotate = "qc_mito_prop")
+point_layer <- which(sapply(p$layers, \(x) inherits(x$geom, "GeomPoint")))
+p$layers[[point_layer]]$aes_params$size <- 1.5
+p
+
+#---Step5: Compare and combine global and local outliers and apply filtering---#
+
+spe$global_outliers <- spe$qc_lib_size | spe$qc_detected | spe$qc_mito_prop
+p1 <- ggspavis::plotSpotQC(spe, plot_type="spot", annotate="global_outliers")
+p2 <- ggspavis::plotSpotQC(spe, plot_type="spot", annotate="local_outliers")
+gridExtra::grid.arrange(p1, p2, ncol=2)
+
+
+#---Step6: Combine local and global outliers to create a final discard flag---#
+
+spe$discard <- spe$global_outliers | spe$local_outliers
+table(spe$discard)
+plotVisium(spe, zoom=T, annotate="discard")
+
+#---Step7: Technical artifacts detection---#
+
+spe <- findArtifacts(spe,
+                     mito_percent = "subsets_Mito_percent",
+                     mito_sum = "subsets_Mito_sum",
+                     n_order = 5,
+                     name = "artifact"
+)
+
+plotQCmetrics(spe,
+              metric = "subsets_Mito_percent", # You can choose any relevant metric to display
+              outliers = "artifact",
+              point_size = 1.1
+) +
+  ggtitle("Detected Spatial Artifacts")
+
+#---Step8: Final Filtering---#
+
+spe <- spe[, !spe$discard]
+spe <- spe[rowSums(counts(spe)) > 0, ]
+
+path="/fs04/scratch2/bm26/eeka0003/AT5/Young_0/Exercise 2"
+saveHDF5SummarizedExperiment(spe,
+                             dir = path,
+                             prefix="02.Day0_Young_",
+                             replace=TRUE,chunkdim=NULL,
+                             level=NULL,
+                             as.sparse=NA,verbose=NA)
+
+
+######EXERCISE 03########
+
+packages <- c(
+  "SpatialExperiment", "scran", "scater",
+  "ggplot2", "patchwork", "bluster",
+  "escheR", "pheatmap", "HDF5Array",
+  "ggspavis", "nnSVG", "leidenAlg",
+  "Banksy", "SpaNorm", "igraph"
+)
+
+# Check which packages are installed
+installed <- packages %in% rownames(installed.packages())
+
+data.frame(
+  Package = packages,
+  Installed = installed
+)
+
+missing_packages <- packages[!installed]
+
+# Install BiocManager if needed
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+# Install missing packages
+BiocManager::install(missing_packages, ask = FALSE, update = FALSE)
+
+#Load libraries
+library(SpatialExperiment)
+library(ggplot2)
+library(scuttle)
+library(scran) 
+library(scater) 
+library(ggplot2)
+library(patchwork) 
+library(bluster)
+library(escheR) 
+library(pheatmap)
+library(HDF5Array) 
+library(ggspavis)
+library(nnSVG)
+library(leidenAlg)
+library(Banksy)
+library(SpaNorm)
+library(igraph)
+
+#---Step 1: Start by loading the SpatialExperiment object---#
+path="~/bm26_scratch/eeka0003/AT5/Young_0/Exercise 2"
+spe <- loadHDF5SummarizedExperiment(dir=path, prefix="02.Day0_Young_")
+
+#---Step 2: Log Normalization
+spe <- logNormCounts(spe)
+
+spe@assays
+
+assayNames(spe)
+
+assay(spe,"logcounts")
+
+#---Step 3: Compute size factors---#
+
+summary(sizeFactors(spe))
+
+colData(spe)$sizeFactors <- sizeFactors(spe)
+plotVisium(spe, annotate = "sizeFactors", zoom = TRUE)
+
+#---Step4: spatially-aware normalization---#
+
+spe_spanorm <- SpaNorm::SpaNorm(spe)
+
+spe_spanorm@assays
+
+assayNames(spe_spanorm)
+
+table( summary(as.vector(as.matrix(logcounts(spe)))) )
+table( summary(as.vector(as.matrix(logcounts(spe_spanorm)))) )
+
+#---Step 5: Feature Selection – Highly Variable Genes (HVGs)---#
+
+dec <- modelGeneVarByPoisson(spe)
+head(dec)
+
+## Sort by biological variance
+dec <- dec[order(dec$bio, decreasing = T), ]
+
+plot(dec$mean, dec$total,
+     xlab = "Mean expression (log-counts)",
+     ylab = "Total variance (log-counts)",
+     main = "Mean-Variance Trend"
+)
+curve(metadata(dec)$trend(x), add = TRUE, col = "dodgerblue", lwd = 2)
+
+#---Step 6: Visualize the HVGs---#\
+
+is.mito <- rownames(spe)[grepl("^mt-", rownames(spe))]
+top_HVG <- row.names(dec[!row.names(dec) %in% is.mito, ])[1:6]
+print(top_HVG)
+
+# Create a plot for each gene in top_HVG
+rownames(spe) <- gsub("-", "_", rownames(spe))
+top_HVG <- gsub("-", "_",top_HVG)
+#choose plotCoords or ggspavis::plotSpots, it up to the version 
+# figure arrangement and change colors
+ps <- lapply(top_HVG, \(.) {
+  ggspavis::plotSpots(spe, 
+                      annotate = ., 
+                      assay_name = "logcounts") }) # use "logcounts" assay to visualise log normalised counts
+patchwork::wrap_plots(ps, nrow = 2) & 
+  theme(legend.key.width = unit(0.4, "lines"), 
+        legend.key.height = unit(0.8, "lines")) & 
+  scale_color_gradientn(colors = rev(hcl.colors(9, "Rocket")))
+
+# Select the top 1000 highly variable genes.
+hvg <- getTopHVGs(dec, n = 1000) 
+#check whether all of hvg can be found in the Symbol
+print(sum(hvg %in% rowData(spe)$Symbol))
+
+not_found_hvg <- hvg[!hvg %in% rowData(spe)$Symbol]
+# Store HVG information in rowData
+rowData(spe)$hvg <- rowData(spe)$Symbol %in% hvg | 
+  rowData(spe)$ID %in% gsub("^.*_", "", not_found_hvg)
+print(sum(rowData(spe)$hvg))
+
+# Display the range of biological variation for the selected HVGs
+dec[hvg, ]$bio |> summary()
+
+set.seed(123)
+hvg_valid <- hvg[
+  hvg %in% rownames(spe) &
+    !grepl("-", hvg)]
+random_HVG <- sample(hvg_valid, size = 6)
+# Create a plot for each gene in top_HVG
+ps <- lapply(random_HVG, \(.) {
+  ggspavis::plotSpots(spe, 
+                      annotate = ., 
+                      assay_name = "logcounts") }) # use "logcounts" assay to visualise log normalised counts
+# figure arrangement and change colors
+patchwork::wrap_plots(ps, nrow = 2) & 
+  theme(legend.key.width = unit(0.4, "lines"), 
+        legend.key.height = unit(0.8, "lines")) & 
+  scale_color_gradientn(colors = rev(hcl.colors(9, "Rocket")))
+
+#---Step 7: Save Data
+
+spe_HVG <- spe
+
+path=getwd()
+saveHDF5SummarizedExperiment(spe_HVG,
+                             dir = path, 
+                             prefix="03.Day0_Young_", 
+                             replace=TRUE,chunkdim=NULL, 
+                             level=NULL, as.sparse=NA,verbose=NA)
+

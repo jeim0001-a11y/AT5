@@ -1,0 +1,101 @@
+.libPaths(c("/fs04/scratch2/bm26/shared_spatial_scRNAseq_env/spatialR_2026/renv/library/linux-ubuntu-noble/R-4.4/x86_64-pc-linux-gnu", .libPaths()))
+
+#Loading R libraries required
+
+library(rlang)
+library(dplyr)
+library(VisiumIO)
+library(SpatialExperiment)
+library(scuttle)
+library(HDF5Array)
+library(ggplot2)
+library(ggspavis)
+library(arrow)
+library(qs2)
+library(patchwork)
+
+#Visualize the tree structure of the output directory
+fs::dir_tree("/fs04/bm26/AT5_ST_Data/GSM6108346_Day0_Young/outs")
+
+#---Step 1: Import the dataset into a SpatialExperiment object---#
+#Import the data into R as a SpatialExperiment object
+sample_dir <- "/fs04/bm26/AT5_ST_Data/GSM6108346_Day0_Young"
+spe <- TENxVisium(
+  spacerangerOut = sample_dir,
+  sample_id = "GSM6108346_Day0_Young",
+  processing = "filtered",
+  format = "h5",
+  images = "lowres"
+) |> import()
+
+#---Step2: Exploring the object spe---#
+# Visualize the SpatialExperiment object
+spe
+
+# Reveal the raw counts matrix
+counts(spe)
+
+# Reveal the metadeta for each spot
+colData(spe)
+
+# How many spots are located within the tissue area?
+table(colData(spe)$in_tissue)
+
+# Access information (features) for each gene.
+rowData(spe)
+
+#check gene symbol dupilcates
+sum(duplicated(rowData(spe)$ID))
+sum(duplicated(rowData(spe)$Symbol))
+
+#Which genes map to multiple Ensembl IDs?
+table(rowData(spe)$Symbol)[table(rowData(spe)$Symbol) > 1]
+
+# which Ensembl IDs match one of the duplicate gene Symbols
+rowData(spe)[rowData(spe)$Symbol == "Arhgef4", ]
+
+#check the types of assay
+assayNames(spe)
+assay(spe,"counts")
+
+head(spatialCoords(spe))
+
+#Visualize of Tissue and Expression Data
+imgData(spe)
+
+imgRaster(spe) |> plot()
+
+p1 <- plotVisium(spe, spots = FALSE)
+p2 <- plotVisium(spe, point_size = 0.5)
+p1+p2
+
+plotVisium(spe, annotate = "array_row", zoom = TRUE)
+
+plotVisium(spe,
+           annotate = "ENSMUSG00000086825",#gene name
+           assay = "counts",
+           zoom = TRUE,
+           point_size = 1
+)
+
+#Modify and Subset elements of the Spatial Experiment object
+rownames(spe) <- uniquifyFeatureNames(ID = rowData(spe)$ID, names = rowData(spe)$Symbol)
+head(rownames(spe))
+rowData(spe)[rowData(spe)$Symbol == "Cdkn1a", ]
+
+anyDuplicated(rownames(spe))
+rowData(spe)[rowData(spe)$Symbol == "Arhgef4", ]
+
+print(dim(spe))
+sub <- spe[, colData(spe)$in_tissue == 1]
+print(dim(sub))
+
+
+#Save
+path = getwd()
+saveHDF5SummarizedExperiment(sub,
+                             dir = path,
+                             prefix = "01.Day0_Young_", replace = TRUE,
+                             chunkdim = NULL, level = NULL, as.sparse = NA,
+                             verbose = NA
+)

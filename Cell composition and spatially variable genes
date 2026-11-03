@@ -1,6 +1,6 @@
 # Cell composition
 
-'''
+''' {R}
 library(rlang)
 library(Banksy)
 library(BayesSpace)
@@ -9,6 +9,116 @@ library(ggplot2)
 library(ggspavis)
 library(HDF5Array)
 library(igraph)
+library(nnSVG)
+library(patchwork)
+library(pheatmap)
+library(qs2)
+library(RColorBrewer)
+library(scater)
+library(scatterpie)
+library(scran)
+library(scrapper)
+library(Seurat)
+library(SingleCellExperiment)
+library(SingleR)
+library(SpatialExperiment)
+library(SPOTlight)
+library(tidyverse)
+library(viridis)
+library("rhdf5")
+library("zellkonverter")
 '''
+
+## Load Spatial object
+'''{R}
+path="/fs04/scratch2/bm26/dgoode/Exercise_5/"
+spe_y0 <- loadHDF5SummarizedExperiment(dir=path, prefix="05.Day0_Young_")
+spe_y9 <- loadHDF5SummarizedExperiment(dir=path, prefix="05.Day9_Young_")
+spe_a0 <- loadHDF5SummarizedExperiment(dir=path, prefix="05.Day0_Aged_")
+spe_a9 <- loadHDF5SummarizedExperiment(dir=path, prefix="05.Day9_Aged_")
+'''
+
+## Perform cell type annotation with singleR
+
+'''{R}
+ref <- celldex::MouseRNAseqData()
+spe_y0_sym <- spe_y0
+spe_y9_sym <- spe_y9
+spe_a0_sym <- spe_a0
+spe_a9_sym <- spe_a9
+'''
+
+## Predict cell type for each spot
+
+### y0
+'''{R}
+pred_y0 <- SingleR(
+test = spe_y0_sym,
+ref = ref,
+labels = ref$label.main,
+assay.type.test = "logcounts",
+assay.type.ref = "logcounts"
+)
+'''
+
+### y9
+'''{R}
+pred_y9 <- SingleR(
+test = spe_y9_sym,
+ref = ref,
+labels = ref$label.main,
+assay.type.test = "logcounts",
+assay.type.ref = "logcounts"
+)
+'''
+
+### a0
+'''{R}
+pred_a0 <- SingleR(
+test = spe_a0_sym,
+ref = ref,
+labels = ref$label.main,
+assay.type.test = "logcounts",
+assay.type.ref = "logcounts"
+)
+'''
+
+### a9
+'''{R}
+pred_a9 <- SingleR(
+test = spe_a9_sym,
+ref = ref,
+labels = ref$label.main,
+assay.type.test = "logcounts",
+assay.type.ref = "logcounts"
+)
+'''
+
+## Add cell type labels to spe object
+
+###y0
+'''{R}
+spe_y0$SingleR_label <- pred_y0$pruned.labels
+print(table(spe_y9$SingleR_label))
+'''
+
+###y9
+'''{R}
+spe_y9$SingleR_label <- pred_y9$pruned.labels
+print(table(spe_y9$SingleR_label))
+'''
+
+###a0
+'''{R}
+spe_a0$SingleR_label <- pred_a0$pruned.labels
+print(table(spe_a0$SingleR_label))
+'''
+
+###a9
+'''{R}
+spe_a9$SingleR_label <- pred_a9$pruned.labels
+print(table(spe_a9$SingleR_label))
+'''
+
 
 # Spatially variable genes

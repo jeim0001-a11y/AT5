@@ -1,0 +1,384 @@
+# Cell composition
+
+``` {R}
+library(rlang)
+library(Banksy)
+library(BayesSpace)
+library(ggcorrplot)
+library(ggplot2)
+library(ggspavis)
+library(HDF5Array)
+library(igraph)
+library(nnSVG)
+library(patchwork)
+library(pheatmap)
+library(qs2)
+library(RColorBrewer)
+library(scater)
+library(scatterpie)
+library(scran)
+library(scrapper)
+library(Seurat)
+library(SingleCellExperiment)
+library(SingleR)
+library(SpatialExperiment)
+library(SPOTlight)
+library(tidyverse)
+library(viridis)
+library("rhdf5")
+library("zellkonverter")
+```
+
+## Load Spatial object
+
+```{R}
+path="/fs04/scratch2/bm26/dgoode/Exercise_5/"
+spe_y0 <- loadHDF5SummarizedExperiment(dir=path, prefix="05.Day0_Young_")
+spe_y9 <- loadHDF5SummarizedExperiment(dir=path, prefix="05.Day9_Young_")
+spe_a0 <- loadHDF5SummarizedExperiment(dir=path, prefix="05.Day0_Aged_")
+spe_a9 <- loadHDF5SummarizedExperiment(dir=path, prefix="05.Day9_Aged_")
+```
+
+##  Load cell-type reference data from the LungMAP project
+
+```{R}
+ref_path <- "/fs04/scratch2/bm26/shared_spatial_scRNAseq_env/reference/LungMAP_MouseLung_CellRef.v1.ref <- readH5AD(ref_path, reader = "R", use_hdf5 = TRUE)
+ref_data <- h5read(ref_path, "raw/X/data")
+ref_indices <- h5read(ref_path, "raw/X/indices")
+ref_indptr <- h5read(ref_path, "raw/X/indptr")
+raw_counts <- new("dgCMatrix",
+              x = as.numeric(ref_data),
+              i = as.integer(ref_indices),
+              p = as.integer(ref_indptr),
+              Dim = c(26727L, 71439L),
+              Dimnames = list(rownames(ref), colnames(ref)))
+print(head(Matrix::colSums(raw_counts), 10))
+```
+
+```{R}
+stopifnot(
+  identical(dim(raw_counts), dim(ref)),
+  isTRUE(all.equal(
+    as.numeric(Matrix::colSums(raw_counts)[1:10]),
+    as.numeric(ref$nCount_RNA[1:10])
+  ))
+)
+```
+
+```{R}
+print(head(ref$nCount_RNA, 10))
+```
+
+## Convert the reference single-cell data into a Seurat object
+
+```{R}
+sce <- CreateSeuratObject(counts = raw_counts,
+                          meta.data = as.data.frame(colData(ref)))
+```
+
+## Filter LungMAP reference data
+
+
+```{R}
+table(sce$Time,sce$celltype_level2)
+```
+
+```{R}
+sce <- sce[, sce$Time == "PND28"]
+table(sce$Time,sce$celltype_level2)
+```
+
+## Feature selection
+
+```{R}
+sce <- as.SingleCellExperiment(sce, assay = "RNA")
+```
+
+```{R}
+sce <- logNormCounts(sce)
+```
+
+### Model variance
+```{R}
+genes <- !grepl(pattern = "^Rp[l|s]|Mt", x = rownames(sce))
+dec <- modelGeneVar(sce, subset.row = genes)
+plot(dec$mean, dec$total, xlab = "Mean log-expression", ylab = "Variance")
+curve(metadata(dec)$trend(x), col = "blue", add = TRUE)
+```
+
+### Get 3000 most HVG
+```{R}
+hvg <- getTopHVGs(dec, n = 3000)
+```
+
+```{R}
+colLabels(sce) <- colData(sce)$celltype_level2
+mgs <- scran::scoreMarkers(sce, subset.row = genes)
+```
+
+```{R}
+check_mgs <- as.data.frame(mgs[["AT2"]])
+head(check_mgs)
+```
+
+```{R}
+mgs_fil <- lapply(names(mgs), function(i) {
+  x <- mgs[[i]]
+  # Filter and keep relevant marker genes, those with AUC > 0.8
+  x <- x[x$mean.AUC > 0.8, ]
+  # Sort the genes from highest to lowest weight
+  x <- x[order(x$mean.AUC, decreasing = TRUE), ]
+  # Add gene and cluster id to the dataframe
+  x$gene <- rownames(x)
+  x$cluster <- i
+  data.frame(x)
+})
+mgs_df <- do.call(rbind, mgs_fil)
+```
+
+```{R}
+table(mgs_df$cluster)
+
+stopifnot(
+  all(c("CD4 T", "CD8 T") %in% mgs_df$cluster)
+)
+```
+
+## Cell downsampling
+
+```{R}
+idx <- split(seq(ncol(sce)), sce$celltype_level2)
+names(idx)
+```
+
+```{R}
+set.seed(123)
+n_cells <- 100
+cs_keep <- lapply(idx, function(i) {
+  n <- length(i)
+  if (n < n_cells) {
+    sample(i, n)
+  } else {
+    sample(i, n_cells)
+  }
+})
+
+sce <- sce[, unlist(cs_keep)]
+```
+# Cell-Type Deconvolution with SPOTlight
+
+```{R}
+-Type Deconvolution with SPOTlight
+# Create output folder
+output_dir <- "Exercise6_results"
+dir.create(output_dir, showWarnings = FALSE)
+
+# Function to run SPOTlight on one SPE
+run_spotlight <- function(spe, sample_name) {
+
+  # Keep original SPE unchanged during gene renaming
+  spe_spotlight <- spe
+
+  # Use unique gene symbols to match LungMAP
+  rownames(spe_spotlight) <-
+    scuttle::uniquifyFeatureNames(
+      ID = rowData(spe)$ID,
+      names = rowData(spe)$Symbol
+    )
+
+  # Check raw counts and gene overlap
+  stopifnot("counts" %in% assayNames(spe_spotlight))
+
+  shared_genes <- intersect(
+    rownames(spe_spotlight),
+    rownames(sce)
+  )
+
+  cat(sample_name, "- Shared genes:",
+      length(shared_genes), "\n")
+
+  stopifnot(length(shared_genes) > 1000)
+
+  # Run deconvolution
+  set.seed(123)
+
+  deconv <- SPOTlight::SPOTlight(
+    x = sce,
+    y = spe_spotlight,
+    groups = as.character(sce$celltype_level2),
+    mgs = mgs_df,
+    hvg = hvg,
+    weight_id = "mean.AUC",
+    group_id = "cluster",
+    gene_id = "gene"
+  )
+
+  # Extract cell-type contributions
+  mat <- deconv$mat
+
+  # Match spot order
+  stopifnot(all(colnames(spe) %in% rownames(mat)))
+  mat <- mat[colnames(spe), , drop = FALSE]
+
+  # Check T-cell predictions
+  stopifnot(all(
+    c("CD4 T", "CD8 T") %in% colnames(mat)
+  ))
+
+  stopifnot(all(is.finite(
+    mat[, c("CD4 T", "CD8 T"), drop = FALSE]
+  )))
+
+  # Add T-cell contributions to original SPE
+  spe$spotlight_CD4T <- mat[, "CD4 T"]
+  spe$spotlight_CD8T <- mat[, "CD8 T"]
+
+  # Save all cell-type estimates
+  saveRDS(
+    mat,
+    file.path(
+      output_dir,
+      paste0(sample_name, "_SPOTlight.rds")
+    )
+  )
+
+  return(spe)
+}
+
+```
+
+```{R}
+# Day 0 Young
+spe_y0 <- run_spotlight(
+  spe_y0, "Day0_Young"
+)
+
+# Day 9 Young
+spe_y9 <- run_spotlight(
+  spe_y9, "Day9_Young"
+)
+
+# Day 0 Aged
+spe_a0 <- run_spotlight(
+  spe_a0, "Day0_Aged"
+)
+
+# Day 9 Aged
+spe_a9 <- run_spotlight(
+  spe_a9, "Day9_Aged"
+)
+```
+
+```{R}
+spe_list <- list(
+  Day0_Young = spe_y0,
+  Day9_Young = spe_y9,
+  Day0_Aged = spe_a0,
+  Day9_Aged = spe_a9
+)
+```
+
+```{R}
+# Generate comparable spatial maps
+for (cell in c("spotlight_CD4T",
+               "spotlight_CD8T")) {
+
+  # Same colour scale across four samples
+  max_value <- max(vapply(
+    spe_list,
+    function(s) max(s[[cell]], na.rm = TRUE),
+    numeric(1)
+  ))
+
+  stopifnot(is.finite(max_value), max_value > 0)
+
+  plots <- lapply(names(spe_list), function(nm) {
+
+    ggspavis::plotSpots(
+      spe_list[[nm]],
+      annotate = cell,
+      point_size = 0.7
+    ) +
+      scale_colour_gradient(
+        low = "grey95",
+        high = "darkred",
+        limits = c(0, max_value)
+      ) +
+      ggtitle(nm)
+  })
+
+  combined_plot <- patchwork::wrap_plots(
+    plots,
+    ncol = 2
+  )
+
+  print(combined_plot)
+
+  ggsave(
+    file.path(
+      output_dir,
+      paste0(cell, "_four_samples.pdf")
+    ),
+    plot = combined_plot,
+    width = 12,
+    height = 9
+  )
+}
+```
+
+```{R}
+comparison <- do.call(rbind, lapply(
+  names(spe_list), function(nm) {
+
+    s <- spe_list[[nm]]
+
+    data.frame(
+      sample = nm,
+      spots = ncol(s),
+
+      mean_CD4T = mean(
+        s$spotlight_CD4T,
+        na.rm = TRUE
+      ),
+
+      mean_CD8T = mean(
+        s$spotlight_CD8T,
+        na.rm = TRUE
+      ),
+
+      median_CD4T = median(
+        s$spotlight_CD4T,
+        na.rm = TRUE
+      ),
+
+      median_CD8T = median(
+        s$spotlight_CD8T,
+        na.rm = TRUE
+      )
+    )
+  }
+))
+
+print(comparison)
+
+write.csv(
+  comparison,
+  file.path(
+    output_dir,
+    "Tcell_comparison.csv"
+  ),
+  row.names = FALSE
+)
+```
+
+```{R}
+for (nm in names(spe_list)) {
+
+  saveHDF5SummarizedExperiment(
+    spe_list[[nm]],
+    dir = output_dir,
+    prefix = paste0("06.", nm, "_"),
+    replace = TRUE
+  )
+}
+```

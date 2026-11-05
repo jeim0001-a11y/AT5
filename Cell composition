@@ -1,6 +1,6 @@
 # Cell composition
 
-``` {R}
+```  {r}
 library(rlang)
 library(Banksy)
 library(BayesSpace)
@@ -27,11 +27,13 @@ library(tidyverse)
 library(viridis)
 library("rhdf5")
 library("zellkonverter")
+library(Matrix)
+library(scuttle)
 ```
 
 ## Load Spatial object
 
-```{R}
+``` {r}
 path="/fs04/scratch2/bm26/dgoode/Exercise_5/"
 spe_y0 <- loadHDF5SummarizedExperiment(dir=path, prefix="05.Day0_Young_")
 spe_y9 <- loadHDF5SummarizedExperiment(dir=path, prefix="05.Day9_Young_")
@@ -41,8 +43,14 @@ spe_a9 <- loadHDF5SummarizedExperiment(dir=path, prefix="05.Day9_Aged_")
 
 ##  Load cell-type reference data from the LungMAP project
 
-```{R}
-ref_path <- "/fs04/scratch2/bm26/shared_spatial_scRNAseq_env/reference/LungMAP_MouseLung_CellRef.v1.ref <- readH5AD(ref_path, reader = "R", use_hdf5 = TRUE)
+``` {r}
+ref_path <- "/fs04/scratch2/bm26/shared_spatial_scRNAseq_env/reference/LungMAP_MouseLung_CellRef.v1.1.h5ad"
+
+ref <- readH5AD(
+  ref_path,
+  reader = "R",
+  use_hdf5 = TRUE
+)
 ref_data <- h5read(ref_path, "raw/X/data")
 ref_indices <- h5read(ref_path, "raw/X/indices")
 ref_indptr <- h5read(ref_path, "raw/X/indptr")
@@ -55,7 +63,7 @@ raw_counts <- new("dgCMatrix",
 print(head(Matrix::colSums(raw_counts), 10))
 ```
 
-```{R}
+``` {r}
 stopifnot(
   identical(dim(raw_counts), dim(ref)),
   isTRUE(all.equal(
@@ -65,13 +73,13 @@ stopifnot(
 )
 ```
 
-```{R}
+``` {r}
 print(head(ref$nCount_RNA, 10))
 ```
 
 ## Convert the reference single-cell data into a Seurat object
 
-```{R}
+``` {r}
 sce <- CreateSeuratObject(counts = raw_counts,
                           meta.data = as.data.frame(colData(ref)))
 ```
@@ -79,27 +87,27 @@ sce <- CreateSeuratObject(counts = raw_counts,
 ## Filter LungMAP reference data
 
 
-```{R}
+``` {r}
 table(sce$Time,sce$celltype_level2)
 ```
 
-```{R}
+``` {r}
 sce <- sce[, sce$Time == "PND28"]
 table(sce$Time,sce$celltype_level2)
 ```
 
 ## Feature selection
 
-```{R}
+``` {r}
 sce <- as.SingleCellExperiment(sce, assay = "RNA")
 ```
 
-```{R}
+``` {r}
 sce <- logNormCounts(sce)
 ```
 
 ### Model variance
-```{R}
+``` {r}
 genes <- !grepl(pattern = "^Rp[l|s]|Mt", x = rownames(sce))
 dec <- modelGeneVar(sce, subset.row = genes)
 plot(dec$mean, dec$total, xlab = "Mean log-expression", ylab = "Variance")
@@ -107,21 +115,21 @@ curve(metadata(dec)$trend(x), col = "blue", add = TRUE)
 ```
 
 ### Get 3000 most HVG
-```{R}
+``` {r}
 hvg <- getTopHVGs(dec, n = 3000)
 ```
 
-```{R}
+``` {r}
 colLabels(sce) <- colData(sce)$celltype_level2
 mgs <- scran::scoreMarkers(sce, subset.row = genes)
 ```
 
-```{R}
+``` {r}
 check_mgs <- as.data.frame(mgs[["AT2"]])
 head(check_mgs)
 ```
 
-```{R}
+``` {r}
 mgs_fil <- lapply(names(mgs), function(i) {
   x <- mgs[[i]]
   # Filter and keep relevant marker genes, those with AUC > 0.8
@@ -136,7 +144,7 @@ mgs_fil <- lapply(names(mgs), function(i) {
 mgs_df <- do.call(rbind, mgs_fil)
 ```
 
-```{R}
+``` {r}
 table(mgs_df$cluster)
 
 stopifnot(
@@ -146,12 +154,12 @@ stopifnot(
 
 ## Cell downsampling
 
-```{R}
+``` {r}
 idx <- split(seq(ncol(sce)), sce$celltype_level2)
 names(idx)
 ```
 
-```{R}
+``` {r}
 set.seed(123)
 n_cells <- 100
 cs_keep <- lapply(idx, function(i) {
@@ -167,8 +175,7 @@ sce <- sce[, unlist(cs_keep)]
 ```
 # Cell-Type Deconvolution with SPOTlight
 
-```{R}
--Type Deconvolution with SPOTlight
+``` {r}
 # Create output folder
 output_dir <- "Exercise6_results"
 dir.create(output_dir, showWarnings = FALSE)
@@ -247,7 +254,7 @@ run_spotlight <- function(spe, sample_name) {
 
 ```
 
-```{R}
+``` {r}
 # Day 0 Young
 spe_y0 <- run_spotlight(
   spe_y0, "Day0_Young"
@@ -269,7 +276,7 @@ spe_a9 <- run_spotlight(
 )
 ```
 
-```{R}
+``` {r}
 spe_list <- list(
   Day0_Young = spe_y0,
   Day9_Young = spe_y9,
@@ -278,7 +285,7 @@ spe_list <- list(
 )
 ```
 
-```{R}
+``` {r}
 # Generate comparable spatial maps
 for (cell in c("spotlight_CD4T",
                "spotlight_CD8T")) {
@@ -326,7 +333,7 @@ for (cell in c("spotlight_CD4T",
 }
 ```
 
-```{R}
+``` {r}
 comparison <- do.call(rbind, lapply(
   names(spe_list), function(nm) {
 
@@ -371,7 +378,7 @@ write.csv(
 )
 ```
 
-```{R}
+``` {r}
 for (nm in names(spe_list)) {
 
   saveHDF5SummarizedExperiment(

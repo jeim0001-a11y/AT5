@@ -15,17 +15,590 @@ library(patchwork)
 library(pheatmap)
 ```
 
+# Load files from before
 ```{R}
+# Directory containing saved Exercise 6 objects
+path <- "/path/to/Exercise6_results/"
+
+# Load all four datasets
+spe_y0 <- loadHDF5SummarizedExperiment(
+  dir = path, prefix = "06.Day0_Young_"
+)
+
+spe_y9 <- loadHDF5SummarizedExperiment(
+  dir = path, prefix = "06.Day9_Young_"
+)
+
+spe_a0 <- loadHDF5SummarizedExperiment(
+  dir = path, prefix = "06.Day0_Aged_"
+)
+
+spe_a9 <- loadHDF5SummarizedExperiment(
+  dir = path, prefix = "06.Day9_Aged_"
+)
 ```
 
 ```{R}
+spe_list <- list(
+  Day0_Young = spe_y0,
+  Day9_Young = spe_y9,
+  Day0_Aged = spe_a0,
+  Day9_Aged = spe_a9
+)
 ```
 
 ```{R}
+  # Select up to 1000 HVGs
+  hvg_idx <- which(rowData(sub)$hvg %in% TRUE)
+  hvg_idx <- head(hvg_idx, 1000)
+
+  sub <- sub[hvg_idx, ]
+
+  # Remove genes expressed in too few spots
+  keep <- MatrixGenerics::rowSums(counts(sub) > 0) >=
+    max(10, ceiling(0.01 * ncol(sub)))
+
+  sub <- sub[keep, ]
+
+  # Add gene names
+  rowData(sub)$gene_name <- rowData(sub)$Symbol
+
+  return(sub)
+})
+
+# Check dimensions for all four samples
+lapply(sub_list, dim)
 ```
 
-```{R}
-```
+## Run nnSVG
 
 ```{R}
+set.seed(123)
+
+svg_list <- lapply(sub_list, function(sub) {
+  nnSVG::nnSVG(sub)
+})
+
+# Extract results for each sample
+res_nnSVG <- lapply(svg_list, function(sub) {
+
+  results <- as.data.frame(rowData(sub))
+
+  results <- results[
+    order(results$padj, na.last = TRUE),
+  ]
+
+  return(results)
+})
+
+# View the top SVGs for each sample
+lapply(res_nnSVG, head)
+```
+
+```{r}
+# Create results directories
+output_dir <- "Exercise7_results"
+dir.create(output_dir, showWarnings = FALSE)
+
+dir.create(
+  file.path(output_dir, "figures"),
+  showWarnings = FALSE
+)
+
+# Save nnSVG results for all four samples
+for (nm in names(res_nnSVG)) {
+
+  write.csv(
+    res_nnSVG[[nm]],
+    file.path(
+      output_dir,
+      paste0(nm, "_nnSVG.csv")
+    ),
+    row.names = TRUE
+  )
+
+  cat(
+    nm, "- Significant SVGs:",
+    sum(res_nnSVG[[nm]]$padj < 0.05, na.rm = TRUE),
+    "\n"
+  )
+}
+```
+
+```{r}
+library(DESpace)
+
+# Run DESpace for all four datasets
+res_DESpace <- lapply(names(spe_list), function(nm) {
+
+  spe <- spe_list[[nm]]
+
+  # Check spatial clustering exists
+  stopifnot(
+    "Leiden_Banksy" %in% colnames(colData(spe))
+  )
+
+  set.seed(123)
+
+  res <- DESpace::DESpace_test(
+    spe,
+    spatial_cluster = "Leiden_Banksy",
+    verbose = TRUE
+  )
+
+  # Extract gene results
+  results <- as.data.frame(res$gene_results)
+
+  # Sort by FDR
+  results <- results[
+    order(results$FDR, na.last = TRUE),
+    ,
+    drop = FALSE
+  ]
+
+  # Save results
+  write.csv(
+    results,
+    file.path(
+      output_dir,
+      paste0(nm, "_DESpace.csv")
+    ),
+    row.names = FALSE
+  )
+
+  cat(
+    nm, "- Significant DESpace SVGs:",
+    sum(results$FDR < 0.05, na.rm = TRUE),
+    "\n"
+  )
+
+  return(results)
+})
+
+names(res_DESpace) <- names(spe_list)
+
+# Check top genes for every sample
+lapply(res_DESpace, head)
+```
+
+```{r}
+# Plot the top nnSVG gene for each sample
+for (nm in names(spe_list)) {
+
+  results <- res_nnSVG[[nm]]
+
+  # Select top gene with a valid adjusted p-value
+  valid <- which(!is.na(results$padj))
+
+  if (length(valid) == 0) {
+    next
+  }
+
+  top_gene <- as.character(
+    results$gene_name[valid[1]]
+  )
+
+  # Plot spatial expression
+  p <- ggspavis::plotSpots(
+    spe_list[[nm]],
+    annotate = top_gene,
+    assay_name = "logcounts",
+    feature_names = "Symbol"
+  ) +
+    ggtitle(paste(nm, "-", top_gene))
+
+  print(p)
+
+  ggsave(
+    file.path(
+      output_dir,
+      "figures",
+      paste0(nm, "_top_SVG.pdf")
+    ),
+    plot = p,
+    width = 7,
+    height = 6
+  )
+}
+```
+
+```{r}
+library(msigdbr)
+library(AUCell)
+library(Matrix)
+
+# Find genes present in all four samples
+id_lists <- lapply(spe_list, function(s) {
+
+  ids <- as.character(rowData(s)$ID)
+
+  # Exclude missing and duplicated identifiers
+  ids[
+    !is.na(ids) &
+    nzchar(ids) &
+    !duplicated(ids) &
+    !duplicated(ids, fromLast = TRUE)
+  ]
+})
+
+common_ids <- Reduce(intersect, id_lists)
+
+cat("Shared genes:", length(common_ids), "\n")
+
+stopifnot(length(common_ids) > 1000)
+
+# Retrieve mouse Hallmark gene sets
+db <- msigdbr::msigdbr(
+  species = "Mus musculus",
+  collection = "H"
+)
+
+gs <- split(db$ensembl_gene, db$gs_name)
+
+names(gs) <- tolower(
+  gsub("HALLMARK_", "", names(gs))
+)
+
+# Keep genes present in the common gene universe
+gs <- lapply(gs, function(x) {
+  intersect(unique(x), common_ids)
+})
+
+# Require at least 5 detected genes per signature
+gs <- gs[lengths(gs) >= 5]
+
+cat("Hallmark signatures:", length(gs), "\n")
+```
+
+```{r}
+# Candidate T-cell-state markers
+tcell_markers <- list(
+
+  tcell_naive_like = c(
+    "Tcf7", "Lef1", "Sell", "Ccr7",
+    "S1pr1", "Klf2", "Ltb", "Bach2"
+  ),
+
+  tcell_effector_like = c(
+    "Gzmb", "Prf1", "Ifng", "Ccl5",
+    "Nkg7", "Gzma", "Cxcr3", "Klrg1"
+  ),
+
+  tcell_memory_like = c(
+    "Il7r", "Bcl2", "Tcf7", "Cd44",
+    "Slamf6", "Cd27", "Cxcr3", "Bach2"
+  )
+)
+
+# Use Day 0 Young gene annotations to map
+# gene symbols to Ensembl IDs
+annotation <- rowData(spe_list$Day0_Young)
+
+tcell_sets <- lapply(tcell_markers, function(markers) {
+
+  ids <- as.character(annotation$ID[
+    as.character(annotation$Symbol) %in% markers
+  ])
+
+  intersect(unique(ids), common_ids)
+})
+
+# Check how many genes are available
+print(lengths(tcell_sets))
+
+# Require reasonable gene-set coverage
+if (any(lengths(tcell_sets) < 5)) {
+  stop("Insufficient T-cell marker overlap. Review signatures.")
+}
+
+# Combine Hallmark and T-cell gene sets
+all_gene_sets <- c(gs, tcell_sets)
+```
+
+```{r}
+# Use the same ranking threshold for all samples
+auc_max_rank <- ceiling(0.05 * length(common_ids))
+
+# Run AUCell for all four datasets
+spe_list <- lapply(names(spe_list), function(nm) {
+
+  spe <- spe_list[[nm]]
+
+  cat("Running AUCell for:", nm, "\n")
+
+  # Match the common Ensembl IDs
+  idx <- match(
+    common_ids,
+    as.character(rowData(spe)$ID)
+  )
+
+  stopifnot(!anyNA(idx))
+
+  # Extract expression matrix
+  mtx <- as(
+    logcounts(spe)[idx, , drop = FALSE],
+    "dgCMatrix"
+  )
+
+  rownames(mtx) <- common_ids
+
+  # Build expression rankings
+  set.seed(123)
+
+  rnk <- AUCell::AUCell_buildRankings(
+    mtx,
+    plotStats = FALSE,
+    verbose = FALSE
+  )
+
+  # Calculate pathway and T-cell signature scores
+  auc <- AUCell::AUCell_calcAUC(
+    geneSets = all_gene_sets,
+    rankings = rnk,
+    aucMaxRank = auc_max_rank,
+    verbose = FALSE
+  )
+
+  # Transpose: spots x signatures
+  scores <- t(as.matrix(assay(auc)))
+
+  # Match spot order
+  stopifnot(
+    all(colnames(spe) %in% rownames(scores))
+  )
+
+  scores <- scores[
+    colnames(spe),
+    ,
+    drop = FALSE
+  ]
+
+  # Add scores to SPE metadata
+  for (sig in colnames(scores)) {
+    spe[[sig]] <- scores[, sig]
+  }
+
+  # Save complete score matrix
+  write.csv(
+    scores,
+    file.path(
+      output_dir,
+      paste0(nm, "_AUCell.csv")
+    )
+  )
+
+  return(spe)
+})
+
+names(spe_list) <- c(
+  "Day0_Young",
+  "Day9_Young",
+  "Day0_Aged",
+  "Day9_Aged"
+)
+
+# Check calculated signatures
+colnames(colData(spe_list$Day0_Young))
+```
+
+```{r}
+# Select signatures relevant to Aims A and B
+selected_signatures <- c(
+  "tcell_naive_like",
+  "tcell_effector_like",
+  "tcell_memory_like",
+  "interferon_gamma_response",
+  "interferon_alpha_response",
+  "inflammatory_response"
+)
+
+# Generate four-sample spatial maps
+for (sig in selected_signatures) {
+
+  # Check signature exists in every sample
+  stopifnot(all(vapply(
+    spe_list,
+    function(s) sig %in% colnames(colData(s)),
+    logical(1)
+  )))
+
+  # Common colour scale across four samples
+  max_value <- max(vapply(
+    spe_list,
+    function(s) max(s[[sig]], na.rm = TRUE),
+    numeric(1)
+  ))
+
+  plots <- lapply(names(spe_list), function(nm) {
+
+    ggspavis::plotSpots(
+      spe_list[[nm]],
+      annotate = sig,
+      point_size = 0.7
+    ) +
+      scale_colour_gradient(
+        low = "grey95",
+        high = "darkred",
+        limits = c(0, max_value)
+      ) +
+      ggtitle(nm)
+  })
+
+  combined <- patchwork::wrap_plots(
+    plots,
+    ncol = 2
+  )
+
+  print(combined)
+
+  # Save figure
+  ggsave(
+    file.path(
+      output_dir,
+      "figures",
+      paste0(sig, "_four_samples.pdf")
+    ),
+    plot = combined,
+    width = 12,
+    height = 9
+  )
+}
+```
+
+```{r}
+# Representative T-cell-associated marker genes
+marker_genes <- c(
+  "Tcf7",
+  "Gzmb",
+  "Il7r"
+)
+
+for (gene in marker_genes) {
+
+  # Check gene is present exactly once in each sample
+  gene_idx <- lapply(spe_list, function(s) {
+    which(as.character(rowData(s)$Symbol) == gene)
+  })
+
+  if (!all(lengths(gene_idx) == 1)) {
+    warning(paste("Skipping", gene, "- gene ID not unique"))
+    next
+  }
+
+  # Determine a common expression scale
+  max_expression <- max(unlist(
+    lapply(names(spe_list), function(nm) {
+
+      s <- spe_list[[nm]]
+      i <- gene_idx[[nm]]
+
+      as.numeric(logcounts(s)[i, ])
+    })
+  ), na.rm = TRUE)
+
+  if (!is.finite(max_expression) ||
+      max_expression <= 0) {
+    next
+  }
+
+  plots <- lapply(names(spe_list), function(nm) {
+
+    ggspavis::plotSpots(
+      spe_list[[nm]],
+      annotate = gene,
+      feature_names = "Symbol",
+      assay_name = "logcounts",
+      point_size = 0.7
+    ) +
+      scale_colour_gradient(
+        low = "grey95",
+        high = "darkred",
+        limits = c(0, max_expression)
+      ) +
+      ggtitle(nm)
+  })
+
+  combined <- patchwork::wrap_plots(
+    plots,
+    ncol = 2
+  )
+
+  print(combined)
+
+  ggsave(
+    file.path(
+      output_dir,
+      "figures",
+      paste0(gene, "_four_samples.pdf")
+    ),
+    plot = combined,
+    width = 12,
+    height = 9
+  )
+}
+```
+
+```{r}
+# Select variables for comparison
+comparison_variables <- c(
+  "spotlight_CD4T",
+  "spotlight_CD8T",
+  "tcell_naive_like",
+  "tcell_effector_like",
+  "tcell_memory_like",
+  "interferon_gamma_response",
+  "interferon_alpha_response",
+  "inflammatory_response"
+)
+
+# Calculate sample-level summaries
+comparison <- do.call(rbind, lapply(
+  names(spe_list), function(nm) {
+
+    spe <- spe_list[[nm]]
+
+    stopifnot(all(
+      comparison_variables %in%
+        colnames(colData(spe))
+    ))
+
+    medians <- vapply(
+      comparison_variables,
+      function(sig) {
+        median(spe[[sig]], na.rm = TRUE)
+      },
+      numeric(1)
+    )
+
+    data.frame(
+      sample = nm,
+      as.list(medians),
+      check.names = FALSE
+    )
+  }
+))
+
+print(comparison)
+
+write.csv(
+  comparison,
+  file.path(
+    output_dir,
+    "Four_sample_comparison.csv"
+  ),
+  row.names = FALSE
+)
+```
+
+```{r}
+# Save all four processed SPE objects
+for (nm in names(spe_list)) {
+
+  saveHDF5SummarizedExperiment(
+    spe_list[[nm]],
+    dir = output_dir,
+    prefix = paste0("07.", nm, "_"),
+    replace = TRUE
+  )
+}
 ```
